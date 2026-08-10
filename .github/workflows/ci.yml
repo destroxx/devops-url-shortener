@@ -339,8 +339,14 @@ jobs:
       # Python packages together. Most CVEs in a container live in the base
       # image, which neither of the earlier tools ever looks at.
       # ------------------------------------------------------------------------
+      # NOTE the `v` prefix. This action's tags are `v0.36.0`, not `0.36.0`.
+      # An earlier revision of this file referenced a bare `0.28.0`, which does
+      # not exist, and the job failed at action-resolution time -- before a
+      # single step ran. Worth internalising: a workflow can be perfectly valid
+      # YAML and still fail instantly because an action reference is wrong.
+      # There is no local linter for this; only a real run proves it.
       - name: Scan image with Trivy
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ github.event_name == 'pull_request' && fromJSON(steps.meta.outputs.json).tags[0] || format('{0}/{1}@{2}', env.REGISTRY, env.IMAGE_NAME, steps.docker_build.outputs.digest) }}
           format: sarif
