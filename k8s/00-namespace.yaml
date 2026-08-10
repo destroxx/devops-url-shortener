@@ -1,0 +1,94 @@
+# ==============================================================================
+# NAMESPACE -- a virtual cluster inside the physical cluster.
+#
+# Namespaces give you:
+#   * Name scoping. A Service called `postgres` in `url-shortener` is a
+#     completely different object from `postgres` in `team-b`.
+#   * A blast-radius boundary. `kubectl delete namespace url-shortener` removes
+#     everything this project created and touches nothing else.
+#   * An attachment point for policy. ResourceQuotas, NetworkPolicies, and RBAC
+#     rules are almost always scoped to a namespace.
+#
+# Never deploy real workloads into `default`. It has no quota, no policy, and
+# everyone's junk accumulates there until nobody can tell what is still needed.
+# ==============================================================================
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: url-shortener
+  labels:
+    name: url-shortener
+    # ------------------------------------------------------------------------
+    # THE RECOMMENDED KUBERNETES LABELS.
+    #
+    # These are a convention (app.kubernetes.io/*) that tooling understands --
+    # dashboards, service meshes, and cost-attribution systems all read them.
+    # Adopt them from day one; retrofitting labels across a live cluster is
+    # painful because some selectors are immutable after creation.
+    # ------------------------------------------------------------------------
+    app.kubernetes.io/name: url-shortener
+    app.kubernetes.io/part-of: url-shortener
+    # Pod Security Admission. `restricted` is the strictest built-in profile:
+    # it forbids running as root, privilege escalation, host networking, and
+    # most capabilities. Enforcing it at the NAMESPACE level means a careless
+    # manifest is REJECTED rather than quietly granted privileges.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+
+---
+# ==============================================================================
+# RESOURCE QUOTA -- a hard ceiling on what this namespace may consume.
+#
+# Without a quota, one runaway Deployment (a bad `replicas: 500`, or a memory
+# leak) can starve every other workload on the cluster. The quota converts a
+# cluster-wide outage into a contained, local failure with a clear error.
+# ==============================================================================
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: url-shortener-quota
+  namespace: url-shortener
+spec:
+  hard:
+    requests.cpu: "4"
+    requests.memory: 8Gi
+    limits.cpu: "8"
+    limits.memory: 16Gi
+    persistentvolumeclaims: "4"
+    pods: "20"
+
+---
+# ==============================================================================
+# LIMIT RANGE -- defaults and bounds for individual containers.
+#
+# A container with NO resource requests is scheduled as "BestEffort" QoS: it is
+# the FIRST thing killed when a node runs short of memory. Developers forget
+# requests constantly, so LimitRange injects sensible defaults automatically.
+#
+# It also enforces a maximum, which stops a typo (`memory: 100Gi`) from
+# creating a pod that can never be scheduled anywhere and sits Pending forever.
+# ==============================================================================
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: url-shortener-limits
+  namespace: url-shortener
+spec:
+  limits:
+    - type: Container
+      # Applied when a container specifies no limits.
+      default:
+        cpu: 500m
+        memory: 512Mi
+      # Applied when a container specifies no requests.
+      defaultRequest:
+        cpu: 100m
+        memory: 128Mi
+      max:
+        cpu: "2"
+        memory: 2Gi
+      min:
+        cpu: 10m
+        memory: 32Mi

@@ -1,0 +1,100 @@
+# ==============================================================================
+# SERVICE -- a stable network identity in front of a moving set of pods.
+#
+# Pods are mortal and anonymous: every restart yields a new IP. A Service gives
+# you one virtual IP and one DNS name that never change, and load-balances
+# across whichever pods currently match its selector.
+#
+# The selector is a LIVE QUERY, not a fixed list. Pods appear in the Service's
+# endpoint list the moment they pass their READINESS probe, and are removed the
+# moment they fail it. That is the mechanism behind zero-downtime rollouts: a
+# new pod receives no traffic until it says it is ready, and a terminating pod
+# is removed BEFORE it is killed.
+#
+# THE FOUR SERVICE TYPES:
+#
+#   ClusterIP     (default) reachable only INSIDE the cluster. Correct for
+#                 anything not exposed to the internet -- databases, internal
+#                 APIs. The safe default.
+#   NodePort      opens the same high port (30000-32767) on EVERY node. Crude,
+#                 but dependency-free, which is why it suits kind.
+#   LoadBalancer  asks the cloud provider for a real load balancer (an AWS ELB,
+#                 a GCP forwarding rule). Costs money per service, which is why
+#                 production usually puts ONE ingress controller behind a single
+#                 LoadBalancer and routes everything through it.
+#   ExternalName  a CNAME to an outside host. No proxying at all.
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Internal ClusterIP service -- the "proper" one.
+# ------------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: url-shortener
+  namespace: url-shortener
+  labels:
+    app.kubernetes.io/name: url-shortener
+    app.kubernetes.io/component: api
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8000"
+    prometheus.io/path: "/metrics"
+spec:
+  type: ClusterIP
+  # THE SELECTOR. Any pod carrying ALL of these labels receives traffic.
+  # This is what decouples a Service from the Deployment: the Service does not
+  # know or care that a Deployment created these pods.
+  selector:
+    app.kubernetes.io/name: url-shortener
+    app.kubernetes.io/component: api
+  ports:
+    - name: http
+      # The port the SERVICE listens on.
+      port: 80
+      # The port on the POD to forward to. Referencing the container port by
+      # NAME rather than number means the container can move to a different
+      # port without editing this file.
+      targetPort: http
+      protocol: TCP
+
+  # Distribute each connection independently. The alternative, `ClientIP`,
+  # pins a client to one pod ("sticky sessions") -- occasionally necessary,
+  # but it undermines even load distribution and complicates rollouts.
+  sessionAffinity: None
+
+---
+# ------------------------------------------------------------------------------
+# 2. NodePort service -- so you can reach the app from your Mac.
+#
+# kind runs the cluster inside Docker containers, so there is no cloud load
+# balancer available. The kind-config.yaml maps host port 30080 to the node's
+# port 30080, and this Service opens 30080 on the node.
+#
+#     your Mac :30080  ->  kind node :30080  ->  Service  ->  pod :8000
+#
+# In a real cloud cluster you would delete this and use an Ingress plus a single
+# shared LoadBalancer instead.
+# ------------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: url-shortener-nodeport
+  namespace: url-shortener
+  labels:
+    app.kubernetes.io/name: url-shortener
+    app.kubernetes.io/component: api
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: url-shortener
+    app.kubernetes.io/component: api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      # Must fall within the cluster's node-port range (30000-32767 by default).
+      # Usually you omit this and let Kubernetes allocate one; it is pinned here
+      # because kind-config.yaml forwards this exact port from the host.
+      nodePort: 30080
+      protocol: TCP

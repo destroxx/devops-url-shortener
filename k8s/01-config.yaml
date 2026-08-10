@@ -1,0 +1,95 @@
+# ==============================================================================
+# CONFIGMAP -- non-sensitive configuration, decoupled from the image.
+#
+# This is 12-Factor Factor III at the Kubernetes layer. The SAME image runs in
+# dev, staging, and production; only the ConfigMap and Secret differ. Changing
+# a setting therefore requires no rebuild, no new image, and no redeploy of
+# anything but the pods.
+# ==============================================================================
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: url-shortener-config
+  namespace: url-shortener
+  labels:
+    app.kubernetes.io/name: url-shortener
+    app.kubernetes.io/component: config
+data:
+  ENVIRONMENT: "kubernetes"
+  LOG_LEVEL: "INFO"
+  SHORT_CODE_LENGTH: "7"
+  BASE_URL: "http://localhost:30080"
+
+  # --------------------------------------------------------------------------
+  # SERVICE DISCOVERY, the Kubernetes way.
+  #
+  # `postgres` is a Service name. Kubernetes runs a cluster DNS server (CoreDNS)
+  # that resolves it. The fully qualified form is:
+  #
+  #     postgres.url-shortener.svc.cluster.local
+  #     <service>.<namespace>.svc.<cluster-domain>
+  #
+  # The short name works because pods get a DNS search path that includes their
+  # own namespace. Prefer the short name WITHIN a namespace and the fully
+  # qualified name across namespaces, where the short form would not resolve.
+  #
+  # NOTE: the password is deliberately NOT here -- it comes from the Secret and
+  # is assembled into DATABASE_URL by the Deployment. Splitting them is the
+  # whole point: this file can be read by anyone with cluster access, and it
+  # should stay boring.
+  # --------------------------------------------------------------------------
+  POSTGRES_HOST: "postgres"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "shortener"
+  POSTGRES_USER: "shortener"
+
+---
+# ==============================================================================
+# SECRET
+#
+# READ THIS BEFORE YOU TRUST IT:
+#
+#   A Kubernetes Secret is BASE64-ENCODED, NOT ENCRYPTED.
+#
+#   Base64 is trivially reversible by anyone, with no key:
+#       echo 'bG9jYWxkZXZwYXNzd29yZA==' | base64 -d   ->  localdevpassword
+#
+#   So a Secret committed to git is EXACTLY as compromised as a plaintext
+#   password in git. The encoding exists to allow binary values and to prevent
+#   accidental shoulder-surfing. It provides ZERO security.
+#
+#   By default, Secrets are also stored UNENCRYPTED in etcd, meaning anyone
+#   with etcd access or an etcd backup can read every secret in the cluster.
+#
+# HOW REAL CLUSTERS HANDLE THIS -- pick one:
+#
+#   1. External Secrets Operator  -- the real value lives in AWS Secrets
+#      Manager / Vault / GCP Secret Manager, and the operator syncs it into the
+#      cluster at runtime. Nothing sensitive is ever in git.
+#   2. Sealed Secrets (Bitnami)   -- you commit an ENCRYPTED SealedSecret that
+#      only the in-cluster controller's private key can decrypt. Safe in git.
+#   3. SOPS + age/KMS            -- encrypt the values file itself; decrypt in
+#      the deploy pipeline.
+#   4. At minimum, enable encryption-at-rest for etcd, and restrict `get
+#      secrets` with RBAC.
+#
+# THIS FILE IS COMMITTED ONLY BECAUSE IT IS A LOCAL LEARNING CLUSTER AND THE
+# VALUE PROTECTS NOTHING. Never do this for anything real.
+# ==============================================================================
+apiVersion: v1
+kind: Secret
+metadata:
+  name: url-shortener-secret
+  namespace: url-shortener
+  labels:
+    app.kubernetes.io/name: url-shortener
+    app.kubernetes.io/component: secret
+type: Opaque
+# `stringData` accepts plain text and Kubernetes base64-encodes it on the way
+# in. It is strictly more readable than pre-encoding into `data:` by hand, and
+# it removes a whole class of "I encoded the trailing newline too" bugs:
+#     echo    "pw" | base64   ->  includes a newline, and your app fails to auth
+#     printf "pw" | base64    ->  correct
+stringData:
+  POSTGRES_PASSWORD: "localdevpassword"

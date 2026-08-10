@@ -1,0 +1,59 @@
+# ==============================================================================
+# kind = "Kubernetes IN Docker".
+#
+# It runs a genuine, fully conformant Kubernetes cluster where each NODE is a
+# Docker container rather than a physical machine or a cloud VM. Same API, same
+# scheduler, same controllers -- so everything you learn here transfers exactly
+# to EKS, GKE, or AKS. It just costs nothing and starts in about a minute.
+#
+#     kind create cluster --config k8s/kind-config.yaml
+# ==============================================================================
+
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: url-shortener
+
+nodes:
+  # ----------------------------------------------------------------------------
+  # CONTROL PLANE -- the brain of the cluster. It runs:
+  #   kube-apiserver          the ONLY component anything talks to; every other
+  #                           part reads and writes cluster state through it
+  #   etcd                    the database holding all cluster state
+  #   kube-scheduler          decides WHICH node each new pod lands on
+  #   kube-controller-manager runs the reconciliation loops
+  # ----------------------------------------------------------------------------
+  - role: control-plane
+    kubeadmConfigPatches:
+      # Label this node so the ingress controller is willing to schedule here.
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      # Forward ports from your Mac into the cluster node, so you can reach
+      # services at localhost. Without this the cluster is reachable only from
+      # inside Docker's network.
+      - containerPort: 30080
+        hostPort: 30080
+        protocol: TCP
+      # Grafana
+      - containerPort: 30300
+        hostPort: 30300
+        protocol: TCP
+      # Prometheus
+      - containerPort: 30090
+        hostPort: 30090
+        protocol: TCP
+
+  # ----------------------------------------------------------------------------
+  # WORKER NODES -- where your pods actually run. Each runs:
+  #   kubelet     the agent that starts and supervises containers on this node
+  #   kube-proxy  programs the networking rules that make Services work
+  #
+  # Two workers, deliberately. With a single node you cannot observe scheduling
+  # decisions, pod anti-affinity, or what happens when a node is drained -- and
+  # those are exactly the behaviours worth learning.
+  # ----------------------------------------------------------------------------
+  - role: worker
+  - role: worker

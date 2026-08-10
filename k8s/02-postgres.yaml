@@ -1,0 +1,191 @@
+# ==============================================================================
+# POSTGRESQL as a StatefulSet.
+#
+# A NOTE ON REALITY FIRST: running a production database inside Kubernetes is a
+# genuinely hard job -- backups, point-in-time recovery, failover, major-version
+# upgrades, and connection storms are all your problem. Most teams use a managed
+# service (RDS, Cloud SQL) and point the app at it. This StatefulSet exists so
+# the local cluster is self-contained and so you can see how stateful workloads
+# differ from stateless ones.
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# HEADLESS SERVICE (clusterIP: None)
+#
+# A normal Service gives you ONE virtual IP that load-balances across pods --
+# exactly wrong for a database, where you must address a SPECIFIC instance
+# (the primary, not a replica).
+#
+# `clusterIP: None` makes DNS return the pod IPs directly instead of a virtual
+# IP, and gives every pod a stable hostname:
+#     postgres-0.postgres.url-shortener.svc.cluster.local
+#
+# A StatefulSet REQUIRES a headless service for this stable identity.
+# ------------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: url-shortener
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/component: database
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: url-shortener
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/component: database
+spec:
+  # Ties this StatefulSet to the headless Service above, which is what produces
+  # the stable per-pod DNS names.
+  serviceName: postgres
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres
+        app.kubernetes.io/component: database
+    spec:
+      # ------------------------------------------------------------------------
+      # POD SECURITY CONTEXT -- required by the `restricted` Pod Security
+      # profile enforced on this namespace.
+      #
+      # fsGroup matters specifically for stateful workloads: the mounted volume
+      # is chowned to this GID so the non-root process can actually write to it.
+      # Forget it and Postgres crash-loops with a permissions error on startup.
+      # ------------------------------------------------------------------------
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999      # the `postgres` user in the official image
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: postgres
+          image: postgres:16.6-alpine
+
+          ports:
+            - name: postgres
+              containerPort: 5432
+
+          env:
+            # Non-sensitive values come from the ConfigMap...
+            - name: POSTGRES_DB
+              valueFrom:
+                configMapKeyRef:
+                  name: url-shortener-config
+                  key: POSTGRES_DB
+            - name: POSTGRES_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: url-shortener-config
+                  key: POSTGRES_USER
+            # ...and the password from the Secret. Referencing it by key means
+            # the value never appears in this file, never appears in
+            # `kubectl get statefulset -o yaml`, and can be rotated without
+            # touching this manifest.
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: url-shortener-secret
+                  key: POSTGRES_PASSWORD
+            # The official image initialises the database into this directory.
+            # A SUBDIRECTORY of the mount is required, not the mount root:
+            # many volume types place a `lost+found` directory at the root, and
+            # Postgres refuses to initialise into a non-empty directory.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+
+          # --- Probes -----------------------------------------------------
+          # Same liveness/readiness split as the application, for the same
+          # reasons. `pg_isready` is cheap and answers exactly the right
+          # question: are you accepting connections?
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "shortener", "-d", "shortener"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "shortener", "-d", "shortener"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # A STARTUP PROBE protects a slow-starting container. While it is
+          # running, the liveness probe is suspended entirely. Without it you
+          # face an impossible trade-off: a liveness timeout long enough for
+          # first-boot initialisation is far too slow to detect a real hang
+          # later. The startup probe lets you have both.
+          startupProbe:
+            exec:
+              command: ["pg_isready", "-U", "shortener", "-d", "shortener"]
+            periodSeconds: 5
+            # 30 x 5s = up to 150s to start before we give up.
+            failureThreshold: 30
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            # NOTE: not readOnlyRootFilesystem here -- Postgres writes to
+            # several paths outside its data directory. Requiring it would need
+            # extra emptyDir mounts; the application Deployment does enforce it.
+
+  # ----------------------------------------------------------------------------
+  # volumeClaimTemplates -- unique to StatefulSets.
+  #
+  # Kubernetes creates ONE PersistentVolumeClaim PER POD, named
+  # <claim>-<statefulset>-<ordinal>, e.g. postgres-data-postgres-0. That claim
+  # stays bound to that pod's identity forever: delete postgres-0 and its
+  # replacement reattaches to the SAME disk with the same data.
+  #
+  # A Deployment cannot do this. All its replicas would share one claim, which
+  # for a database means instant corruption.
+  #
+  # DELIBERATE SAFETY BEHAVIOUR: deleting the StatefulSet does NOT delete these
+  # PVCs. Kubernetes will not throw away your data on a `kubectl delete`. You
+  # must remove the PVCs explicitly, which is a good thing at 2am.
+  # ----------------------------------------------------------------------------
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 2Gi

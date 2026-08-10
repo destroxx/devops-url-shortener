@@ -1,0 +1,312 @@
+# ==============================================================================
+# DEPLOYMENT -- the object you will spend most of your Kubernetes life editing.
+#
+# The ownership chain is worth memorising:
+#
+#     Deployment  ->  ReplicaSet  ->  Pods
+#
+#   Deployment  manages ROLLOUTS (and therefore rollbacks) by creating a new
+#               ReplicaSet for each revision.
+#   ReplicaSet  keeps exactly N pods alive. This is the reconciliation loop.
+#   Pod         one or more containers that always share a network namespace,
+#               an IP address, and a lifecycle.
+#
+# Because the old ReplicaSet is retained (scaled to 0), `kubectl rollout undo`
+# is instant: it just scales the previous ReplicaSet back up.
+# ==============================================================================
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: url-shortener
+  namespace: url-shortener
+  labels:
+    app.kubernetes.io/name: url-shortener
+    app.kubernetes.io/component: api
+    app.kubernetes.io/version: "0.1.0"
+
+spec:
+  # Three replicas, not one. Two independent reasons:
+  #   AVAILABILITY -- a node can fail, or be drained for an upgrade, without
+  #                   any user-visible downtime.
+  #   ROLLOUTS     -- with one replica there is no way to replace it without a
+  #                   gap in service.
+  # Note the HorizontalPodAutoscaler in 05-hpa.yaml takes over this number once
+  # it is running.
+  replicas: 3
+
+  # How Kubernetes decides which pods belong to this Deployment.
+  # IMPORTANT: `selector` is IMMUTABLE after creation. Choose it carefully --
+  # changing it later requires deleting and recreating the Deployment.
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: url-shortener
+      app.kubernetes.io/component: api
+
+  # Keep the last 5 ReplicaSets so you can roll back several revisions. The
+  # default is 10; each one is cheap (it holds no running pods), so this is
+  # purely about how far back `rollout undo --to-revision` can reach.
+  revisionHistoryLimit: 5
+
+  # ----------------------------------------------------------------------------
+  # ROLLING UPDATE STRATEGY -- deploying with ZERO downtime.
+  #
+  #   maxUnavailable: 0  never drop below the desired replica count. Capacity is
+  #                      never reduced during a deploy, so a rollout cannot
+  #                      cause a latency spike or dropped requests.
+  #   maxSurge: 1        add at most one EXTRA pod at a time above the desired
+  #                      count.
+  #
+  # Together: start a new pod, WAIT for it to pass its readiness probe, then
+  # terminate an old one. Repeat. At no instant is capacity below 3.
+  #
+  # The alternative, `Recreate`, kills every old pod before starting any new
+  # one -- simple, and a guaranteed outage. It is only correct when two
+  # versions genuinely cannot coexist, such as an incompatible schema change.
+  # ----------------------------------------------------------------------------
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: url-shortener
+        app.kubernetes.io/component: api
+        app.kubernetes.io/version: "0.1.0"
+      annotations:
+        # Tells Prometheus to scrape these pods. Covered properly in Phase 6.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+
+    spec:
+      # --- Pod-level security -------------------------------------------------
+      # Required by the `restricted` Pod Security profile on this namespace.
+      # This is defence in depth: the Dockerfile ALREADY drops to uid 1001, and
+      # this enforces it again at the cluster layer. If someone later pushes an
+      # image that forgot USER, the cluster refuses to run it rather than
+      # silently granting root.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+        seccompProfile:
+          # Applies the container runtime's default syscall filter, blocking
+          # dozens of syscalls a web app never needs -- and which are the usual
+          # ingredients of a kernel exploit.
+          type: RuntimeDefault
+
+      # How long pods get to shut down gracefully after SIGTERM before SIGKILL.
+      # This is why the Dockerfile uses exec-form CMD: if a shell were PID 1 it
+      # would swallow SIGTERM, this budget would elapse doing nothing, and every
+      # in-flight request would be severed on every single deploy.
+      terminationGracePeriodSeconds: 30
+
+      # --- Spread pods across nodes -------------------------------------------
+      # Without this the scheduler may place all 3 replicas on ONE node, and a
+      # single node failure takes down the entire service. `ScheduleAnyway`
+      # means "prefer to spread, but do not leave pods Pending if you cannot" --
+      # availability with a graceful degradation, rather than a hard failure.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: url-shortener
+              app.kubernetes.io/component: api
+
+      containers:
+        - name: api
+
+          # ------------------------------------------------------------------
+          # IMAGE TAG. Never `latest` -- covered in the CI lesson, and it
+          # matters even more here:
+          #   * You cannot tell what is actually running.
+          #   * Two pods started an hour apart can run DIFFERENT CODE.
+          #   * Rollback is impossible; there is no previous version to name.
+          # Production should deploy by DIGEST (image@sha256:...), which is
+          # cryptographically immutable.
+          # ------------------------------------------------------------------
+          image: url-shortener:0.1.0
+
+          # IfNotPresent uses the node's local copy when present. Required here
+          # because `kind load docker-image` side-loads the image into the
+          # nodes and there is no registry to pull from. `Always` would make the
+          # kubelet try to reach a registry and fail with ImagePullBackOff.
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+
+          # --- Configuration ------------------------------------------------
+          # envFrom pulls in EVERY key from the ConfigMap at once, so adding a
+          # setting later means editing one file rather than two.
+          envFrom:
+            - configMapRef:
+                name: url-shortener-config
+
+          env:
+            # DATABASE_URL is ASSEMBLED here from a non-secret ConfigMap and a
+            # secret password. This is the pattern worth copying: the
+            # connection string never exists in full anywhere on disk, and the
+            # password can be rotated without touching any other manifest.
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: url-shortener-secret
+                  key: POSTGRES_PASSWORD
+            - name: DATABASE_URL
+              value: postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):$(POSTGRES_PORT)/$(POSTGRES_DB)
+
+            # The DOWNWARD API: injects facts about the pod itself. Invaluable
+            # for debugging -- a log line or error response can say exactly
+            # which pod and node produced it.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+
+          # ------------------------------------------------------------------
+          # PROBES -- the payoff for the /health vs /ready split built in Phase 1.
+          # ------------------------------------------------------------------
+
+          # STARTUP: while this is failing, liveness and readiness are BOTH
+          # suspended. It solves the otherwise impossible trade-off between "long
+          # enough for a slow first boot" and "short enough to catch a real hang".
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 2
+            failureThreshold: 15   # up to 30s to start
+
+          # LIVENESS: "is this process wedged?" Failure => RESTART the container.
+          # Points at /health, which touches NO dependencies. If it checked the
+          # database, one DB blip would fail liveness on all 3 pods at once and
+          # Kubernetes would restart the entire fleet -- turning a brief hiccup
+          # into a real outage, exactly when the database can least handle a
+          # thundering herd of reconnects.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            # 3 consecutive failures before restarting. `1` would make a single
+            # slow response -- a GC pause, a noisy neighbour -- restart a
+            # perfectly healthy pod.
+            failureThreshold: 3
+
+          # READINESS: "can I serve traffic RIGHT NOW?" Failure => remove from
+          # the Service's endpoints. NO restart. Points at /ready, which DOES
+          # check the database: a pod that cannot reach its database should stop
+          # receiving requests but does not need killing. When the database
+          # recovers, the pod rejoins automatically.
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+            successThreshold: 1
+
+          # ------------------------------------------------------------------
+          # RESOURCES -- requests and limits are DIFFERENT things, and confusing
+          # them is the most common Kubernetes performance bug.
+          #
+          #   requests = what the SCHEDULER reserves. It is how Kubernetes
+          #              decides whether a pod fits on a node. This is the
+          #              number that determines placement.
+          #   limits   = the hard ceiling enforced at runtime.
+          #
+          # The two resources behave COMPLETELY differently at the limit:
+          #   CPU is COMPRESSIBLE    -> exceeding the limit THROTTLES the process
+          #                             (it just runs slower).
+          #   MEMORY is INCOMPRESSIBLE -> exceeding the limit gets the container
+        #                             OOMKilled instantly. No warning, no
+          #                             graceful shutdown, exit code 137.
+          #
+          # Practical guidance: set memory request == limit (predictable, and
+          # gives Guaranteed QoS), and be generous with the CPU limit, because
+          # CPU throttling causes mysterious latency spikes that are very hard
+          # to attribute.
+          # ------------------------------------------------------------------
+          resources:
+            requests:
+              cpu: 100m        # 0.1 of one core
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi    # equal to the request -> Guaranteed QoS class
+
+          # --- Container-level security ---------------------------------------
+          securityContext:
+            allowPrivilegeEscalation: false
+            # A read-only root filesystem means an attacker who achieves code
+            # execution cannot write a payload to disk. It is a genuinely strong
+            # mitigation and costs almost nothing here, because the app writes
+            # only to /tmp -- mounted as an emptyDir below.
+            readOnlyRootFilesystem: true
+            capabilities:
+              # Linux capabilities are the fine-grained pieces of root's power.
+              # A web app needs NONE of them. Drop everything.
+              drop: ["ALL"]
+
+          volumeMounts:
+            # Required because readOnlyRootFilesystem is true: Python and
+            # uvicorn still need a writable temp directory.
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        # An emptyDir lives and dies with the pod. Perfect for scratch space,
+        # and explicitly NOT persistence.
+        - name: tmp
+          emptyDir: {}
+
+---
+# ==============================================================================
+# POD DISRUPTION BUDGET
+#
+# Protects availability during VOLUNTARY disruptions -- a node drained for a
+# kernel upgrade, a cluster autoscaler consolidating nodes, an administrator
+# running `kubectl drain`.
+#
+# Without a PDB, draining a node evicts every pod on it AT ONCE. Drain two nodes
+# in sequence during a cluster upgrade and you can briefly have zero healthy
+# replicas.
+#
+# `minAvailable: 2` tells Kubernetes: block any voluntary eviction that would
+# leave fewer than 2 pods ready. The drain simply waits.
+#
+# A PDB does NOT protect against INVOLUNTARY disruption -- a node catching fire,
+# an OOM kill, a kernel panic. Nothing can. That is what replicas and spreading
+# across nodes are for.
+# ==============================================================================
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: url-shortener-pdb
+  namespace: url-shortener
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: url-shortener
+      app.kubernetes.io/component: api

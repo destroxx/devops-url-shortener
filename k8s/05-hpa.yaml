@@ -1,0 +1,100 @@
+# ==============================================================================
+# HORIZONTAL POD AUTOSCALER -- add and remove PODS based on observed load.
+#
+# "Horizontal" means more copies. Contrast with a VerticalPodAutoscaler, which
+# gives each pod more CPU and memory. Horizontal is almost always what you want
+# for a stateless web service: it has no ceiling at one machine's size, and it
+# improves fault tolerance at the same time.
+#
+# REQUIREMENT: the HPA reads pod CPU and memory from the metrics-server. Without
+# metrics-server installed it reports `<unknown>` and never scales. kind does
+# not ship it by default -- the deploy script installs it.
+#
+# NOTE: once an HPA exists it OWNS the replica count. Editing `replicas` in the
+# Deployment afterwards has no lasting effect; the HPA overwrites it on the next
+# reconcile. This surprises everyone once.
+# ==============================================================================
+
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: url-shortener-hpa
+  namespace: url-shortener
+  labels:
+    app.kubernetes.io/name: url-shortener
+
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: url-shortener
+
+  minReplicas: 2
+  maxReplicas: 10
+
+  metrics:
+    # ------------------------------------------------------------------------
+    # averageUtilization is a PERCENTAGE OF THE POD'S CPU *REQUEST*, not of the
+    # node's capacity and not of the limit.
+    #
+    # Our request is 100m, so 70% means "scale up when average usage exceeds
+    # 70m per pod". This is why a sensible `requests` value matters so much:
+    # set it too high and the HPA never triggers; too low and it scales on
+    # noise.
+    #
+    # Why 70 and not 90? Headroom. Scaling is not instant -- a new pod must be
+    # scheduled, the image pulled, the process started, and the readiness probe
+    # passed. Trigger at 90% and you are already saturated by the time capacity
+    # arrives.
+    # ------------------------------------------------------------------------
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+
+  # ----------------------------------------------------------------------------
+  # SCALING BEHAVIOUR -- tuning how eagerly it reacts.
+  #
+  # The asymmetry below is deliberate and is the important idea: scale UP fast,
+  # scale DOWN slowly.
+  #
+  # Being over-provisioned for five minutes costs a little money. Being
+  # under-provisioned for five minutes drops user requests. And without a
+  # stabilisation window, a spiky workload causes THRASHING -- scale up, scale
+  # down, scale up -- which is worse than either steady state because every new
+  # pod pays cold-start costs and connection churn.
+  # ----------------------------------------------------------------------------
+  behavior:
+    scaleUp:
+      # React to a spike almost immediately.
+      stabilizationWindowSeconds: 30
+      policies:
+        # Allow doubling...
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+        # ...or adding 2 pods, whichever is greater (selectPolicy: Max).
+        - type: Pods
+          value: 2
+          periodSeconds: 30
+      selectPolicy: Max
+
+    scaleDown:
+      # Wait a full 5 minutes of sustained low load before removing anything.
+      # This is what prevents thrashing on bursty traffic.
+      stabilizationWindowSeconds: 300
+      policies:
+        # Remove at most 50% of pods per minute.
+        - type: Percent
+          value: 50
+          periodSeconds: 60
+      selectPolicy: Min
