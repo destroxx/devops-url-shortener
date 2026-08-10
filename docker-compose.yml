@@ -1,0 +1,128 @@
+# ==============================================================================
+# Docker Compose -- the LOCAL development stack.
+#
+# Purpose: one command (`docker compose up`) gives a new developer the entire
+# system -- app plus database, networked and configured. No "install Postgres,
+# create a user, run these five commands" page in the README that is out of date
+# the day after it is written.
+#
+# Scope: this is for LOCAL DEVELOPMENT. Production uses Kubernetes (see k8s/).
+# Compose has no self-healing, no rolling updates, and no multi-host scheduling.
+# ==============================================================================
+
+services:
+  # ----------------------------------------------------------------------------
+  # PostgreSQL
+  # ----------------------------------------------------------------------------
+  db:
+    # Pinned to an exact minor version. `postgres:latest` would silently become
+    # a new major release one day and refuse to start against your existing data
+    # directory, because Postgres major upgrades require an explicit migration.
+    image: postgres:16.6-alpine
+
+    environment:
+      POSTGRES_USER: shortener
+      # LOCAL DEVELOPMENT ONLY. This value is committed to git deliberately --
+      # it protects nothing, guards no real data, and is reachable only from
+      # your laptop. Writing it plainly is HONEST; a fake-looking placeholder
+      # would tempt someone to treat this file as a place secrets may live.
+      # Production credentials come from Kubernetes Secrets (see k8s/secret.yaml).
+      POSTGRES_PASSWORD: localdevpassword
+      POSTGRES_DB: shortener
+
+    # NOTE: no `ports:` mapping by default. The database is reachable from the
+    # app container over the internal network, but NOT from your host or your
+    # coffee-shop wifi neighbours. Expose it only when you actually need a GUI
+    # client, by uncommenting the block below.
+    # ports:
+    #   - "127.0.0.1:5432:5432"   # bind to loopback ONLY, never 0.0.0.0
+
+    volumes:
+      # A NAMED VOLUME. Container filesystems are ephemeral: everything written
+      # inside a container is destroyed when it is removed. A volume lives
+      # outside the container lifecycle, so `docker compose down && up` keeps
+      # your data. This is the difference between a cache and a database.
+      - postgres_data:/var/lib/postgresql/data
+
+    healthcheck:
+      # pg_isready returns success only once Postgres is accepting connections.
+      # This is what makes `depends_on: condition: service_healthy` meaningful.
+      test: ["CMD-SHELL", "pg_isready -U shortener -d shortener"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      # start_period gives the container time to initialise before failures
+      # count against the retry budget -- first boot creates the data directory.
+      start_period: 10s
+
+    restart: unless-stopped
+
+  # ----------------------------------------------------------------------------
+  # The application
+  # ----------------------------------------------------------------------------
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        APP_VERSION: "0.1.0-local"
+        GIT_SHA: "local"
+
+    ports:
+      # HOST:CONTAINER. Traffic to localhost:8000 on your Mac is forwarded to
+      # port 8000 inside the container.
+      - "8000:8000"
+
+    environment:
+      # ------------------------------------------------------------------------
+      # SERVICE DISCOVERY: the host is `db` -- the SERVICE NAME above, not an IP
+      # and not localhost.
+      #
+      # Compose puts every service on a shared network with an embedded DNS
+      # server, so `db` resolves to that container's current address. This is
+      # essential because container IPs change on every restart; hardcoding one
+      # guarantees a broken stack tomorrow.
+      #
+      # `localhost` would be WRONG here in a way that confuses everyone once:
+      # inside the app container, localhost is the APP container itself, which
+      # is not running Postgres.
+      # ------------------------------------------------------------------------
+      DATABASE_URL: postgresql://shortener:localdevpassword@db:5432/shortener
+      BASE_URL: http://localhost:8000
+      ENVIRONMENT: docker
+      LOG_LEVEL: INFO
+
+    depends_on:
+      db:
+        # WITHOUT `condition: service_healthy`, depends_on only waits for the
+        # container to START, not to be READY. Postgres takes a few seconds to
+        # initialise, so the app would race ahead, fail to connect, and crash.
+        # This is the single most common Compose mistake.
+        condition: service_healthy
+
+    # Restart policy. `unless-stopped` means Docker restarts the container if it
+    # crashes or the daemon reboots, but respects a deliberate `docker stop`.
+    # This is a crude local version of what Kubernetes does properly.
+    restart: unless-stopped
+
+    # --- Defence in depth --------------------------------------------------
+    # The Dockerfile already drops to a non-root user. These add runtime limits,
+    # so a compromise inside the container has as little to work with as possible.
+    security_opt:
+      # Prevent the process from gaining MORE privileges than it started with,
+      # e.g. by executing a setuid binary.
+      - no-new-privileges:true
+
+    # Resource limits. Without them, a memory leak in this container can consume
+    # all host RAM and take down everything else on the machine. Kubernetes calls
+    # these requests/limits and treats them as first-class scheduling input.
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+volumes:
+  # Declaring the named volume. Docker manages where it actually lives on disk.
+  postgres_data:
+    driver: local

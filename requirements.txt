@@ -1,0 +1,26 @@
+# Production dependencies ONLY. These are the packages installed into the
+# container image. Every version is pinned exactly so that a build from a given
+# git commit produces a byte-identical dependency set today and in a year.
+#
+# Upgrade deliberately (Dependabot/Renovate open a PR, CI proves it is safe),
+# never accidentally at build time.
+
+# --- Web framework and server -------------------------------------------------
+fastapi==0.115.6
+# `[standard]` pulls in uvloop and httptools, which are C-accelerated event loop
+# and HTTP parser implementations. Meaningfully faster than the pure-Python path.
+uvicorn[standard]==0.34.0
+
+# --- Data validation and settings ---------------------------------------------
+pydantic==2.10.4
+pydantic-settings==2.7.0
+
+# --- Database -----------------------------------------------------------------
+sqlalchemy==2.0.36
+# The PostgreSQL driver. The `-binary` build ships precompiled wheels, so the
+# container does not need a C compiler or libpq headers at build time. That keeps
+# the final image smaller and the build faster.
+psycopg2-binary==2.9.10
+
+# --- Observability ------------------------------------------------------------
+prometheus-client==0.21.1

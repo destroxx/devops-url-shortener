@@ -1,0 +1,33 @@
+# Development and CI dependencies.
+#
+# Deliberately SEPARATE from requirements.txt. These are installed on your
+# laptop and on CI runners, but never into the production container image:
+#   - a smaller image ships faster and costs less to store
+#   - every package in an image is attack surface; a test framework in
+#     production is surface you gain nothing from
+#
+# `-r requirements.txt` means "also install everything from the prod file",
+# so a single `pip install -r requirements-dev.txt` sets up a full dev env.
+-r requirements.txt
+
+# --- Testing ------------------------------------------------------------------
+pytest==8.3.4
+pytest-cov==6.0.0
+# FastAPI's TestClient is built on httpx; it drives the app in-process, with no
+# real network socket and no server to start. Tests run in milliseconds.
+httpx==0.28.1
+
+# --- Linting and formatting ---------------------------------------------------
+# Ruff replaces flake8, isort, pyupgrade, and more. Written in Rust, so it lints
+# this whole project in well under a second. Fast linters get run; slow ones get
+# disabled by frustrated developers.
+ruff==0.8.4
+
+# --- Security scanning --------------------------------------------------------
+# Bandit performs static analysis for common Python security mistakes:
+# hardcoded passwords, `random` used for secrets, shell=True, unsafe YAML loads.
+bandit[toml]==1.8.0
+# pip-audit checks installed dependencies against the Python Packaging Advisory
+# Database (known CVEs). This catches vulnerable LIBRARIES, whereas bandit
+# catches vulnerable CODE WE WROTE. You need both.
+pip-audit==2.7.3

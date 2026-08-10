@@ -1,0 +1,79 @@
+# =============================================================================
+# SECRETS -- the most important section in this file.
+#
+# A secret committed to git is compromised permanently. Deleting it in a later
+# commit does NOT help: the value stays in history, and automated scanners
+# harvest public pushes within seconds. Recovery means rotating the credential,
+# not editing the repo.
+# =============================================================================
+#
+# SYNTAX WARNING, learned the hard way:
+# A `#` only starts a comment at the START of a line. A trailing `#` becomes
+# part of the PATTERN, so `*.tfvars   # holds passwords` silently matches
+# nothing and ignores nothing. No error is raised -- you discover it when a
+# secret is already public. Keep every comment on its own line.
+#
+.env
+.env.*
+# ...but the TEMPLATE is committed: it documents setting NAMES, never values.
+!.env.example
+*.pem
+*.key
+# Public keys are safe by definition.
+!**/*.pub
+secrets.yaml
+credentials.json
+# Terraform variable files routinely hold database passwords and API keys.
+*.tfvars
+!example.tfvars
+!terraform.tfvars.example
+
+# =============================================================================
+# Python
+# =============================================================================
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+ENV/
+
+# =============================================================================
+# Testing and coverage artefacts -- generated output, never source
+# =============================================================================
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.ruff_cache/
+
+# =============================================================================
+# Terraform
+# =============================================================================
+# Provider binaries: hundreds of MB, re-downloaded by `terraform init`.
+.terraform/
+# STATE FILES. Two independent reasons to never commit these:
+#   1. State contains every attribute of every resource, including generated
+#      passwords and connection strings, in PLAINTEXT.
+#   2. State must be shared and LOCKED across a team. Git cannot lock, so two
+#      concurrent applies would silently corrupt each other's view of reality.
+#      Real teams use a remote backend (S3 + DynamoDB, Terraform Cloud).
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl.bak
+crash.log
+
+# =============================================================================
+# Local application data
+# =============================================================================
+*.db
+*.sqlite3
+
+# =============================================================================
+# Editors and OS noise
+# =============================================================================
+.vscode/
+.idea/
+*.swp
+.DS_Store

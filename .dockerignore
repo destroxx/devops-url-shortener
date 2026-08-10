@@ -1,0 +1,74 @@
+# Everything listed here is excluded from the BUILD CONTEXT -- the set of files
+# Docker uploads to the build engine before running the Dockerfile.
+#
+# Three reasons this file matters, in order of importance:
+#
+# 1. SECURITY. `COPY . .` copies whatever is in the context. Without this file
+#    your `.env`, your `.git` history (which contains every secret ever
+#    committed, even ones later deleted), and any stray *.pem would be baked
+#    into the image. Anyone who can pull the image can extract them with
+#    `docker history` or by simply running a shell in it.
+#
+# 2. SPEED. The whole context is transferred before the build starts. A .venv
+#    directory is hundreds of megabytes of files the image will never use.
+#
+# 3. CACHE CORRECTNESS. Any change inside the context can invalidate the
+#    `COPY . .` layer. If .pytest_cache is included, merely running the tests
+#    busts your cache and forces a rebuild.
+
+# --- Secrets: never, under any circumstances -----------------------------------
+.env
+.env.*
+*.pem
+*.key
+secrets.yaml
+credentials.json
+*.tfvars
+
+# --- Git ------------------------------------------------------------------------
+# .git can be large AND holds the full history of every secret ever committed.
+.git
+.gitignore
+.github
+
+# --- Python build/runtime artefacts ---------------------------------------------
+# .venv is built for macOS/arm64 on your laptop; the image builds its own for
+# Linux. Copying it in would produce broken, mismatched binaries.
+.venv
+venv
+__pycache__
+*.py[cod]
+*.egg-info
+
+# --- Test and lint artefacts ----------------------------------------------------
+.pytest_cache
+.ruff_cache
+.coverage
+coverage.xml
+htmlcov
+tests
+
+# --- Infrastructure: not needed to RUN the app ----------------------------------
+# These describe how to deploy the image; they do not belong inside it.
+terraform
+k8s
+monitoring
+docs
+.terraform
+*.tfstate*
+
+# --- Local databases ------------------------------------------------------------
+*.db
+*.sqlite3
+
+# --- Editors and OS -------------------------------------------------------------
+.vscode
+.idea
+.DS_Store
+*.swp
+
+# --- Docker's own files ---------------------------------------------------------
+Dockerfile
+docker-compose*.yml
+.dockerignore
+README.md

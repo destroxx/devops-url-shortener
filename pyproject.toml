@@ -1,0 +1,95 @@
+# pyproject.toml is the modern, standardised home for Python tooling config
+# (PEP 518/621). Keeping every tool's settings in ONE committed file means your
+# laptop and the CI runner enforce byte-identical rules. The alternative -- each
+# developer's local editor settings -- guarantees arguments about formatting and
+# "works on my machine" lint failures.
+
+[project]
+name = "devops-url-shortener"
+version = "0.1.0"
+description = "A URL shortener used to demonstrate a full DevOps pipeline."
+requires-python = ">=3.11"
+
+# ------------------------------------------------------------------------------
+# Ruff: linter + formatter (replaces flake8, isort, pyupgrade, black)
+# ------------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+exclude = [".venv", "__pycache__", ".git"]
+
+[tool.ruff.lint]
+# Each code is a rule family. Start strict; loosen deliberately, with a comment.
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes: unused imports, undefined names -- catches real bugs
+    "I",   # isort: import ordering, so imports never cause merge conflicts
+    "B",   # flake8-bugbear: likely bugs, e.g. mutable default arguments
+    "C4",  # comprehension simplifications
+    "UP",  # pyupgrade: modernise syntax for the target Python version
+    "S",   # bandit security rules, surfaced inline as you type
+]
+ignore = [
+    "S101",  # "assert used" -- asserts are the entire point of a test suite
+]
+
+[tool.ruff.lint.flake8-bugbear]
+# B008 forbids function calls in argument defaults, because `def f(x=[])`
+# creates ONE list shared by every call -- a real and nasty bug.
+#
+# FastAPI, however, is built on exactly that syntax: `Depends(...)` in a default
+# is how you declare a dependency. These calls are evaluated once at import time
+# by design and are immutable in practice, so we allowlist them SPECIFICALLY
+# rather than switching B008 off. The real protection stays active everywhere else.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Header",
+    "fastapi.Body",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests are allowed to do things production code must not.
+"tests/*" = [
+    "S105",  # hardcoded password string -- test fixtures are not secrets
+    "S106",
+]
+
+# ------------------------------------------------------------------------------
+# pytest
+# ------------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+# -q          quiet output
+# --strict-markers  a typo in a @pytest.mark name becomes an error, not a silent no-op
+# --cov       measure which lines of app/ the tests actually execute
+addopts = [
+    "-q",
+    "--strict-markers",
+    "--cov=app",
+    "--cov-report=term-missing",
+    "--cov-report=xml",
+]
+
+[tool.coverage.run]
+source = ["app"]
+omit = ["*/tests/*"]
+
+[tool.coverage.report]
+# Fail the build if coverage drops below this. A number in CI is what stops
+# coverage quietly eroding release after release.
+#
+# A warning worth internalising: coverage measures which lines RAN, not whether
+# they were CHECKED. 100% coverage with no assertions proves nothing. Treat it
+# as a smoke alarm, not a quality score.
+fail_under = 80
+show_missing = true
+
+# ------------------------------------------------------------------------------
+# Bandit: security static analysis
+# ------------------------------------------------------------------------------
+[tool.bandit]
+exclude_dirs = [".venv", "tests"]
