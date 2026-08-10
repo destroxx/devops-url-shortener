@@ -85,7 +85,7 @@ jobs:
       # under you. Tags are used here for readability; production repositories
       # should pin SHAs and let Dependabot bump them.
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -164,7 +164,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
@@ -256,7 +256,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Buildx is Docker's modern builder. It enables the registry-backed layer
       # cache used below, plus multi-architecture builds.
