@@ -340,7 +340,7 @@ jobs:
       # image, which neither of the earlier tools ever looks at.
       # ------------------------------------------------------------------------
       - name: Scan image with Trivy
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ github.event_name == 'pull_request' && fromJSON(steps.meta.outputs.json).tags[0] || format('{0}/{1}@{2}', env.REGISTRY, env.IMAGE_NAME, steps.docker_build.outputs.digest) }}
           format: sarif
