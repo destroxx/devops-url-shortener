@@ -12,7 +12,7 @@
 
 # --- Testing ------------------------------------------------------------------
 pytest==8.3.4
-pytest-cov==6.0.0
+pytest-cov==7.1.0
 # FastAPI's TestClient is built on httpx; it drives the app in-process, with no
 # real network socket and no server to start. Tests run in milliseconds.
 httpx==0.28.1
