@@ -1,0 +1,96 @@
+# ==============================================================================
+# DEPENDABOT -- the mandatory companion to pinned dependencies.
+#
+# Pinning exact versions buys reproducible builds. It also means your pins ROT:
+# the world keeps finding vulnerabilities in the versions you froze. This
+# project proved it -- the first pin of fastapi==0.115.6 pulled starlette 0.41.3,
+# which carried SEVEN known CVEs.
+#
+# Dependabot closes that loop. It watches for new versions, opens a PULL REQUEST
+# for each bump, and your CI pipeline then proves whether the upgrade is safe.
+# A human reviews a green PR instead of remembering to check for CVEs.
+#
+# Pin for reproducibility; automate the bumps for security. Neither works alone.
+# ==============================================================================
+
+version: 2
+
+updates:
+  # ----------------------------------------------------------------------------
+  # Python dependencies
+  # ----------------------------------------------------------------------------
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - python
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      # Group routine patch/minor bumps into ONE pull request.
+      #
+      # Ungrouped, Dependabot opens a separate PR per package. Fifteen PRs every
+      # Monday is how teams learn to ignore Dependabot entirely -- and an ignored
+      # security tool is worse than none, because it creates false confidence.
+      # One reviewable PR per week actually gets merged.
+      production-minor-patch:
+        dependency-type: production
+        update-types:
+          - minor
+          - patch
+      development:
+        dependency-type: development
+        update-types:
+          - minor
+          - patch
+    # MAJOR versions are deliberately left ungrouped, so each arrives as its own
+    # PR. A major bump means breaking changes and deserves individual review --
+    # exactly the starlette 0.41 -> 1.6 jump this project had to make.
+
+  # ----------------------------------------------------------------------------
+  # GitHub Actions
+  #
+  # Actions are third-party code executing inside your pipeline with access to
+  # your GITHUB_TOKEN. They are a genuine supply-chain surface and need the same
+  # update discipline as application dependencies.
+  # ----------------------------------------------------------------------------
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    labels:
+      - dependencies
+      - ci
+    commit-message:
+      prefix: "chore(ci)"
+    groups:
+      actions:
+        update-types:
+          - minor
+          - patch
+
+  # ----------------------------------------------------------------------------
+  # Docker base images
+  #
+  # Most CVEs in a container come from the BASE IMAGE, not from your code. A
+  # pinned python:3.12.8-slim-bookworm stops receiving security patches the
+  # moment a newer patch release exists.
+  # ----------------------------------------------------------------------------
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    labels:
+      - dependencies
+      - docker
+    commit-message:
+      prefix: "chore(docker)"

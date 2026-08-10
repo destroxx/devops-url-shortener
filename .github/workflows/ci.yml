@@ -1,0 +1,390 @@
+# ==============================================================================
+# CI/CD PIPELINE
+#
+# Runs on every push and pull request. Structure:
+#
+#      lint ──┐
+#             ├──> build ──> scan image ──> push to GHCR (main branch only)
+#      test ──┘
+#
+# lint and test run IN PARALLEL because they are independent -- there is no
+# reason to make a linting run wait for a test suite. `build` declares
+# `needs: [lint, test]`, so it only starts once both have passed. This is
+# "fail fast": the cheapest checks gate the expensive ones, and a formatting
+# mistake never burns five minutes of image-building time.
+# ==============================================================================
+
+name: CI/CD
+
+# ------------------------------------------------------------------------------
+# WHEN does this run?
+# ------------------------------------------------------------------------------
+on:
+  push:
+    branches: [main]
+    # Version tags (v1.2.3) trigger a release-tagged image build.
+    tags: ["v*.*.*"]
+  pull_request:
+    branches: [main]
+  # Lets you trigger a run by hand from the Actions tab -- invaluable for
+  # debugging a pipeline without pushing junk commits.
+  workflow_dispatch:
+
+# ------------------------------------------------------------------------------
+# CONCURRENCY: cancel superseded runs.
+#
+# Push three commits in quick succession and, without this, you get three full
+# pipelines racing each other. Only the newest matters. This saves CI minutes
+# (which cost real money on private repos) and gives faster feedback.
+#
+# `cancel-in-progress` is safe for CI. It would NOT be safe for a deployment
+# workflow -- cancelling a half-finished deploy leaves a broken environment.
+# ------------------------------------------------------------------------------
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# ------------------------------------------------------------------------------
+# PERMISSIONS: least privilege, declared at the top.
+#
+# Every workflow run receives an automatic GITHUB_TOKEN. Historically it was
+# read/write on everything by default -- so a compromised third-party action
+# could push commits, close issues, or publish packages.
+#
+# Setting `contents: read` here makes READ-ONLY the default for every job.
+# Individual jobs re-grant exactly what they need (see the `build` job, which
+# adds `packages: write` only because it publishes an image).
+#
+# This is the single most valuable security setting in a GitHub Actions file.
+# ------------------------------------------------------------------------------
+permissions:
+  contents: read
+
+env:
+  # ghcr.io is GitHub Container Registry -- free for public images and
+  # authenticated with the same GITHUB_TOKEN, so there is no separate registry
+  # credential to manage or rotate.
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ============================================================================
+  # JOB 1: Lint and static analysis  (fast -- fails in seconds)
+  # ============================================================================
+  lint:
+    name: Lint and static analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      # A NOTE ON ACTION VERSIONS:
+      # `@v4` is a mutable tag -- the maintainer can repoint it at new code.
+      # That is a supply-chain risk: a compromised action would run inside your
+      # pipeline with your token. The hardened alternative is to pin the exact
+      # commit SHA (`actions/checkout@8f4b7f8...`), which cannot be changed
+      # under you. Tags are used here for readability; production repositories
+      # should pin SHAs and let Dependabot bump them.
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          # Caches pip downloads between runs, keyed on the requirements files.
+          # Change a requirement and the cache key changes, so a stale cache can
+          # never silently install the wrong versions.
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Ruff (lint)
+        run: ruff check --output-format=github .
+
+      - name: Ruff (formatting)
+        run: ruff format --check --diff .
+
+      - name: Bandit (security analysis of our own code)
+        run: bandit -c pyproject.toml -r app -q
+
+      # pip-audit checks our DEPENDENCIES against the Python advisory database.
+      # bandit finds insecure code WE wrote; pip-audit finds known CVEs in code
+      # we merely installed. Most real vulnerabilities arrive via dependencies,
+      # so you need both.
+      - name: pip-audit (known CVEs in dependencies)
+        run: pip-audit -r requirements.txt --strict
+
+  # ============================================================================
+  # JOB 2: Tests  (runs in parallel with lint)
+  # ============================================================================
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    strategy:
+      # Without this, one failing matrix leg cancels the others -- and you lose
+      # the information about whether the failure is version-specific.
+      fail-fast: false
+      matrix:
+        # Testing multiple versions catches "works on 3.12, breaks on 3.11"
+        # before a user finds it.
+        python-version: ["3.11", "3.12"]
+
+    # --------------------------------------------------------------------------
+    # SERVICE CONTAINERS
+    #
+    # GitHub starts these alongside the job, on a network the job can reach.
+    # This is how you test against a REAL PostgreSQL rather than mocking it --
+    # mocks cannot catch a genuine SQL dialect difference between SQLite and
+    # Postgres, which is exactly the class of bug that reaches production.
+    # --------------------------------------------------------------------------
+    services:
+      postgres:
+        image: postgres:16.6-alpine
+        env:
+          POSTGRES_USER: testuser
+          # Ephemeral CI credential for a database that exists for ~90 seconds
+          # and is reachable only from this runner. Not a secret.
+          POSTGRES_PASSWORD: testpassword
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        # Without a health check the job races ahead and connects before
+        # Postgres is listening. Same lesson as depends_on in Compose.
+        options: >-
+          --health-cmd "pg_isready -U testuser"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      # The suite uses in-memory SQLite via conftest.py, so it is fast and
+      # hermetic. The Postgres service above proves the app genuinely starts
+      # and talks to a real database in the smoke test below.
+      - name: Run tests with coverage
+        env:
+          ENVIRONMENT: ci
+        run: pytest
+
+      - name: Smoke test against real PostgreSQL
+        env:
+          DATABASE_URL: postgresql://testuser:testpassword@localhost:5432/testdb
+          ENVIRONMENT: ci
+        run: |
+          # `set -euo pipefail` -- the lesson from earlier in this project:
+          #   -e  exit on any command failure
+          #   -u  error on undefined variables (catches typos in $VAR names)
+          #   -o pipefail  a pipeline fails if ANY stage fails, not just the last
+          # Without pipefail, `somecommand | tee log` reports success even when
+          # somecommand failed, and your pipeline goes green on a broken build.
+          set -euo pipefail
+
+          uvicorn app.main:app --host 127.0.0.1 --port 8000 &
+          SERVER_PID=$!
+          # Always clean up the background server, even if a check below fails.
+          trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
+
+          # Poll rather than `sleep 10`. A fixed sleep is either too short
+          # (flaky) or too long (wasted minutes on every single run).
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8000/health >/dev/null; then break; fi
+            if [ "$i" -eq 30 ]; then echo "server failed to start"; exit 1; fi
+            sleep 1
+          done
+
+          echo "--- readiness (verifies the PostgreSQL connection) ---"
+          curl -sf http://127.0.0.1:8000/ready
+
+          echo "--- create a short link ---"
+          CODE=$(curl -sf -X POST http://127.0.0.1:8000/api/shorten \
+                   -H 'Content-Type: application/json' \
+                   -d '{"url":"https://example.com"}' \
+                 | python -c 'import sys,json; print(json.load(sys.stdin)["short_code"])')
+
+          echo "--- follow the redirect ---"
+          STATUS=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:8000/$CODE")
+          test "$STATUS" = "307" || { echo "expected 307, got $STATUS"; exit 1; }
+
+          echo "Smoke test passed against PostgreSQL."
+
+      - name: Upload coverage report
+        # `if: always()` so the report is still published when tests FAIL --
+        # which is precisely when you most want to look at it.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.python-version }}
+          path: coverage.xml
+          retention-days: 7
+
+  # ============================================================================
+  # JOB 3: Build, scan, and publish the container image
+  # ============================================================================
+  build:
+    name: Build, scan, and publish image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # THE GATE. This job does not start unless BOTH lint and test succeeded.
+    needs: [lint, test]
+
+    permissions:
+      contents: read
+      # Required to push to GHCR. Granted here and nowhere else -- the lint and
+      # test jobs have no ability to publish anything.
+      packages: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # Buildx is Docker's modern builder. It enables the registry-backed layer
+      # cache used below, plus multi-architecture builds.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Only authenticate when we intend to push. Pull requests from forks do
+      # not get write credentials -- otherwise anyone could open a PR that
+      # publishes a malicious image under your name.
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          # Automatically provided; nothing to create, store, or rotate.
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ------------------------------------------------------------------------
+      # TAGGING STRATEGY. Each tag answers a different question:
+      #   sha-<short>   exactly which commit is this?   (immutable, for rollback)
+      #   main          what is on the main branch?     (moving)
+      #   v1.2.3        which release is this?          (from a git tag)
+      #   latest        the newest release              (convenience only)
+      #
+      # Deploy by DIGEST or by sha- tag, never by `latest`. `latest` is a moving
+      # target: two clusters pulling `latest` an hour apart can run different
+      # code, and you have no way to reproduce what was running during an
+      # incident.
+      # ------------------------------------------------------------------------
+      - name: Derive image tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build image (and push on non-PR events)
+        id: docker_build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # Pull requests BUILD but do not PUSH. We prove the image compiles
+          # without letting untrusted code publish to the registry.
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            APP_VERSION=${{ github.ref_name }}
+            GIT_SHA=${{ github.sha }}
+            BUILD_DATE=${{ github.event.repository.updated_at }}
+          # GitHub Actions layer cache. Remember: every job gets a FRESH VM, so
+          # without this the Docker cache is empty on every single run and each
+          # build reinstalls every dependency from scratch.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Supply-chain metadata, generated automatically:
+          #   sbom        Software Bill of Materials -- every package in the image.
+          #               When the next Log4Shell lands, this is what lets you
+          #               answer "are we affected?" in seconds instead of days.
+          #   provenance  signed attestation of HOW and WHERE the image was built
+          sbom: true
+          provenance: mode=max
+          # Load into the local daemon on PRs so the scan step below has an
+          # image to inspect even when nothing was pushed.
+          load: ${{ github.event_name == 'pull_request' }}
+
+      # ------------------------------------------------------------------------
+      # IMAGE VULNERABILITY SCANNING
+      #
+      # Distinct from the earlier checks. bandit scanned OUR code; pip-audit
+      # scanned our PYTHON dependencies. Trivy scans the ENTIRE IMAGE: the
+      # Debian base layer, system packages like libpq5 and openssl, and the
+      # Python packages together. Most CVEs in a container live in the base
+      # image, which neither of the earlier tools ever looks at.
+      # ------------------------------------------------------------------------
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ github.event_name == 'pull_request' && fromJSON(steps.meta.outputs.json).tags[0] || format('{0}/{1}@{2}', env.REGISTRY, env.IMAGE_NAME, steps.docker_build.outputs.digest) }}
+          format: sarif
+          output: trivy-results.sarif
+          # Report on serious findings only. Including LOW/UNKNOWN produces
+          # hundreds of unactionable lines, and a report nobody reads is worth
+          # nothing. Tune the signal so the alerts stay credible.
+          severity: CRITICAL,HIGH
+          # Do NOT fail the build here. Base images routinely carry unpatched
+          # CVEs with no fix available, and a pipeline that is red for reasons
+          # you cannot act on trains people to ignore red pipelines. Results are
+          # published to the Security tab for triage instead.
+          exit-code: "0"
+          ignore-unfixed: true
+
+      - name: Publish scan results to the Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        # `always()` so results are published even if an earlier step failed.
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-image
+
+      - name: Summarise the build
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          # GITHUB_STEP_SUMMARY renders markdown on the run's summary page --
+          # far friendlier than asking a teammate to dig through raw logs.
+          {
+            echo "### Image published"
+            echo
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Digest | \`${{ steps.docker_build.outputs.digest }}\` |"
+            echo "| Commit | \`${{ github.sha }}\` |"
+            echo
+            echo "**Tags**"
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+            echo
+            echo "Pull the immutable digest (never \`latest\`):"
+            echo '```bash'
+            echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.docker_build.outputs.digest }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

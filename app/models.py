@@ -33,9 +33,7 @@ class ShortLink(Base):
     # The generated slug, e.g. "aB3xK9p". Indexed and unique because every
     # redirect is a lookup on this column — without an index, each redirect
     # would scan the whole table, and latency would grow linearly with data.
-    short_code: Mapped[str] = mapped_column(
-        String(16), unique=True, index=True, nullable=False
-    )
+    short_code: Mapped[str] = mapped_column(String(16), unique=True, index=True, nullable=False)
 
     # 2048 chars is the pragmatic maximum URL length supported across browsers.
     target_url: Mapped[str] = mapped_column(String(2048), nullable=False)

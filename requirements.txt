@@ -6,21 +6,27 @@
 # never accidentally at build time.
 
 # --- Web framework and server -------------------------------------------------
-fastapi==0.115.6
+# Pinned to a version whose transitive starlette is >= 1.3.1. An earlier pin here
+# (fastapi 0.115.6 -> starlette 0.41.3) carried SEVEN known CVEs, found by
+# `pip-audit` before a single line was ever deployed. That is the pinning
+# trade-off in one line: pins give reproducible builds, and pins ROT. The answer
+# is not to stop pinning -- it is to pin AND automate the bumps, which is what
+# .github/dependabot.yml does.
+fastapi==0.141.1
 # `[standard]` pulls in uvloop and httptools, which are C-accelerated event loop
 # and HTTP parser implementations. Meaningfully faster than the pure-Python path.
-uvicorn[standard]==0.34.0
+uvicorn[standard]==0.52.1
 
 # --- Data validation and settings ---------------------------------------------
-pydantic==2.10.4
-pydantic-settings==2.7.0
+pydantic==2.13.4
+pydantic-settings==2.15.0
 
 # --- Database -----------------------------------------------------------------
-sqlalchemy==2.0.36
+sqlalchemy==2.0.51
 # The PostgreSQL driver. The `-binary` build ships precompiled wheels, so the
 # container does not need a C compiler or libpq headers at build time. That keeps
 # the final image smaller and the build faster.
-psycopg2-binary==2.9.10
+psycopg2-binary==2.9.12
 
 # --- Observability ------------------------------------------------------------
 prometheus-client==0.21.1
