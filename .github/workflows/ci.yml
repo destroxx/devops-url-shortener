@@ -302,7 +302,7 @@ jobs:
 
       - name: Build image (and push on non-PR events)
         id: docker_build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           # Pull requests BUILD but do not PUSH. We prove the image compiles
