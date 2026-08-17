@@ -21,13 +21,13 @@ httpx==0.28.1
 # Ruff replaces flake8, isort, pyupgrade, and more. Written in Rust, so it lints
 # this whole project in well under a second. Fast linters get run; slow ones get
 # disabled by frustrated developers.
-ruff==0.8.4
+ruff==0.16.3
 
 # --- Security scanning --------------------------------------------------------
 # Bandit performs static analysis for common Python security mistakes:
 # hardcoded passwords, `random` used for secrets, shell=True, unsafe YAML loads.
-bandit[toml]==1.8.0
+bandit[toml]==1.9.4
 # pip-audit checks installed dependencies against the Python Packaging Advisory
 # Database (known CVEs). This catches vulnerable LIBRARIES, whereas bandit
 # catches vulnerable CODE WE WROTE. You need both.
-pip-audit==2.7.3
+pip-audit==2.10.1
