@@ -15,18 +15,18 @@
 fastapi==0.141.1
 # `[standard]` pulls in uvloop and httptools, which are C-accelerated event loop
 # and HTTP parser implementations. Meaningfully faster than the pure-Python path.
-uvicorn[standard]==0.52.1
+uvicorn[standard]==0.52.4
 
 # --- Data validation and settings ---------------------------------------------
-pydantic==2.13.4
+pydantic==2.13.5
 pydantic-settings==2.15.0
 
 # --- Database -----------------------------------------------------------------
-sqlalchemy==2.0.51
+sqlalchemy==2.0.52
 # The PostgreSQL driver. The `-binary` build ships precompiled wheels, so the
 # container does not need a C compiler or libpq headers at build time. That keeps
 # the final image smaller and the build faster.
 psycopg2-binary==2.9.12
 
 # --- Observability ------------------------------------------------------------
-prometheus-client==0.21.1
+prometheus-client==0.26.0
