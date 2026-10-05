@@ -31,7 +31,7 @@
 # A floating tag means today's build and next month's build produce different
 # images from the same commit -- the reproducibility problem again, one level up
 # from pinned pip requirements.
-FROM python:3.12.8-slim-bookworm AS builder
+FROM python:3.14.8-slim-bookworm AS builder
 
 # PYTHONDONTWRITEBYTECODE: skip .pyc files. They add image weight and are
 #   useless in a container that is rebuilt rather than re-run from cache.
@@ -85,7 +85,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # ------------------------------------------------------------------------------
 # STAGE 2: runtime
 # ------------------------------------------------------------------------------
-FROM python:3.12.8-slim-bookworm AS runtime
+FROM python:3.14.8-slim-bookworm AS runtime
 
 # OCI standard labels. Registries, security scanners, and `docker inspect` read
 # these. `revision` in particular lets you map a running container back to the
